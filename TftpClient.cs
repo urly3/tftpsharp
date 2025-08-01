@@ -9,32 +9,41 @@ class TftpClient
     public void SendFile(IPAddress remote, int port, string filePath, string mode)
     {
         int maxBlockSize = 512;
+        int retryCount = 2;
         byte[] buffer = new byte[maxBlockSize + 4];
         IPEndPoint tftpServer = new(remote, port);
         IPEndPoint? responder = null;
+        using UdpClient conn = new();
+        conn.Client.ReceiveTimeout = 3000;
 
         string filename = Path.GetFileName(filePath);
-
-        UdpClient conn = new();
-        conn.Client.ReceiveTimeout = 3000;
-        int retryCount = 2;
 
         Console.CursorLeft = 0;
         Console.Write("                        ");
         Console.CursorLeft = 0;
         Console.Write($"sending: wrq");
-        SendRequest(buffer, conn, tftpServer, OpCode.Wrq, filename, mode);
 
-        ParseResult res = ParseResponse(conn, ref responder);
-        if (res.Op != OpCode.Ack && res.BlockNumber != 0)
+        try
         {
-            SendError(buffer, conn, responder, ErrorCode.Undefined, "bad ack");
+            SendRequest(buffer, conn, tftpServer, OpCode.Wrq, filename, mode);
+            ParseResult res = ParseResponse(buffer, conn, ref responder);
+            if (responder == null || res.Op != OpCode.Ack && res.BlockNumber != 0)
+            {
+                SendError(buffer, conn, responder, ErrorCode.Undefined, "bad ack");
+                return;
+            }
+        }
+        catch
+        {
+            Console.CursorLeft = 0;
+            Console.WriteLine("tftpsharp: request failed");
             return;
         }
 
         using FileStream file = File.OpenRead(filePath);
-        int bytesRead = 0;
+
         ushort currentBlock = 1;
+        int bytesRead = 0;
         int outputBlock = 1;
         int resends = 0;
 
@@ -46,19 +55,18 @@ class TftpClient
         timer.Start();
         do
         {
-            // set up data packet
-            BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(), (ushort)OpCode.Data);
-            BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2), currentBlock);
-
-            bytesRead = file.Read(buffer, 4, maxBlockSize);
-
             for (int i = 1; i <= retryCount; i++)
             {
+                BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(), (ushort)OpCode.Data);
+                BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2), currentBlock);
+
+                bytesRead = file.Read(buffer, 4, maxBlockSize);
+
                 Console.CursorLeft = 16;
                 Console.Write(outputBlock);
                 conn.Send(buffer, 4 + bytesRead, responder);
 
-                res = ParseResponse(conn, ref responder);
+                ParseResult res = ParseResponse(buffer, conn, ref responder);
 
                 if (res.Op == OpCode.Ack && res.BlockNumber == currentBlock)
                 {
@@ -96,8 +104,8 @@ class TftpClient
                 resends++;
             }
         } while (bytesRead == maxBlockSize);
-        timer.Stop();
 
+        timer.Stop();
         outputBlock--;
 
         Console.CursorLeft = 0;
@@ -152,9 +160,8 @@ class TftpClient
         conn.Send(buffer, totalLength + 1, endpoint);
     }
 
-    ParseResult ParseResponse(UdpClient conn, ref IPEndPoint? endpoint)
+    ParseResult ParseResponse(byte[] buffer, UdpClient conn, ref IPEndPoint? endpoint)
     {
-        byte[] buffer = [];
         try
         {
             buffer = conn.Receive(ref endpoint);
