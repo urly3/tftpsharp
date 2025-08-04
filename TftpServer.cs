@@ -4,16 +4,14 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-class TftpClient
+class TftpServer
 {
-    public void SendFile(IPAddress remote, int port, string filePath, string mode)
+    public void Listen(IPAddress remote, int port, string filePath, string mode)
     {
         int maxBlockSize = 512;
-        int retryCount = 2;
         byte[] buffer = new byte[maxBlockSize + 4];
-        IPEndPoint tftpServer = new(remote, port);
-        IPEndPoint? responder = null;
-        using UdpClient conn = new();
+        IPEndPoint? client = null;
+        using UdpClient conn = new(69);
         conn.Client.ReceiveTimeout = 3000;
 
         string filename = Path.GetFileName(filePath);
@@ -25,12 +23,17 @@ class TftpClient
 
         try
         {
-            SendRequest(buffer, conn, tftpServer, OpCode.Wrq, filename, mode);
-            ParseResult res = ParseResponse(buffer, conn, ref responder);
-            if (responder == null || res.Op != OpCode.Ack && res.BlockNumber != 0)
+            GetRequest(buffer, conn, ref client);
+            ParseResult res = ParseResponse(buffer, conn, ref client);
+            if (client == null || res.Op != OpCode.Wrq || res.Op != OpCode.Rrq)
             {
-                SendError(buffer, conn, responder, ErrorCode.Undefined, "bad ack");
+                SendError(buffer, conn, client, ErrorCode.Undefined, "bad request");
                 return;
+            }
+
+            if (res.Op == OpCode.Wrq && res.Message != null)
+            {
+                GetFile(buffer, conn, ref client, res.Message);
             }
         }
         catch
@@ -39,10 +42,15 @@ class TftpClient
             Console.WriteLine("tftpsharp: request failed");
             return;
         }
+    }
 
-        using FileStream file = File.OpenRead(filePath);
+    public void GetFile(byte[] buffer, UdpClient conn, ref IPEndPoint client, string fileName)
+    {
+        using FileStream file = File.OpenWrite(fileName);
 
         ushort currentBlock = 1;
+        int retryCount = 2;
+        int maxBlockSize = 512;
         int bytesRead = 0;
         int outputBlock = 1;
         int resends = 0;
@@ -64,9 +72,9 @@ class TftpClient
 
                 Console.CursorLeft = 16;
                 Console.Write(outputBlock);
-                conn.Send(buffer, 4 + bytesRead, responder);
+                conn.Send(buffer, 4 + bytesRead, client);
 
-                ParseResult res = ParseResponse(buffer, conn, ref responder);
+                ParseResult res = ParseResponse(buffer, conn, ref client!);
 
                 if (res.Op == OpCode.Ack && res.BlockNumber == currentBlock)
                 {
@@ -79,7 +87,7 @@ class TftpClient
                 {
                     if (res.Op != OpCode.Error)
                     {
-                        SendError(buffer, conn, responder, ErrorCode.Undefined, "bad ack");
+                        SendError(buffer, conn, client, ErrorCode.Undefined, "bad ack");
                     }
                     timer.Stop();
 
@@ -91,7 +99,7 @@ class TftpClient
                     Console.WriteLine("tftpsharp: transfer failed");
                     if (res.Op == OpCode.Error)
                     {
-                        Console.WriteLine($"err received: {res.ErrorMessage}");
+                        Console.WriteLine($"err received: {res.Message}");
                     }
                     Console.WriteLine(
                         $"  sent {outputBlock} blocks, {(512 * (outputBlock - 1) + bytesRead)} bytes, {resends} resends"
@@ -121,25 +129,10 @@ class TftpClient
         return;
     }
 
-    void SendRequest(
-        byte[] buffer,
-        UdpClient conn,
-        IPEndPoint endpoint,
-        OpCode type,
-        string fileName,
-        string mode
-    )
+    IPEndPoint GetRequest(byte[] buffer, UdpClient conn, ref IPEndPoint? endpoint)
     {
-        int totalLength = 4 + fileName.Length + mode.Length;
-        BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)OpCode.Wrq);
-
-        byte[] nameBytes = Encoding.UTF8.GetBytes(fileName);
-        byte[] modeBytes = Encoding.UTF8.GetBytes(mode);
-
-        nameBytes.AsSpan().CopyTo(buffer.AsSpan(2));
-        modeBytes.AsSpan().CopyTo(buffer.AsSpan(2 + nameBytes.Length + 1));
-
-        conn.Send(buffer, totalLength, endpoint);
+        buffer = conn.Receive(ref endpoint);
+        return endpoint;
     }
 
     void SendError(
@@ -189,9 +182,17 @@ class TftpClient
                 {
                     Op = op,
                     Err = (ErrorCode)errorCode,
-                    ErrorMessage = errorMessage,
+                    Message = errorMessage,
                 };
             }
+            case OpCode.Wrq:
+                string filename = Encoding.UTF8.GetString(
+                    buffer.AsSpan(2, Array.IndexOf(buffer, 0))
+                );
+                return new ParseResult() { Op = op, Message = filename };
+            case OpCode.Rrq:
+                filename = Encoding.UTF8.GetString(buffer.AsSpan(2, Array.IndexOf(buffer, 0)));
+                return new ParseResult() { Op = op, Message = filename };
             default:
             {
                 break;
