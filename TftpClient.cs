@@ -2,10 +2,11 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
+using static System.Text.Encoding;
 
 class TftpClient
 {
+    Queue<byte[]> PacketQueue = [];
     public void SendFile(IPAddress remote, int port, string filePath, string mode)
     {
         int maxBlockSize = 512;
@@ -19,9 +20,9 @@ class TftpClient
         string filename = Path.GetFileName(filePath);
 
         Console.CursorLeft = 0;
-        Console.Write("                        ");
+        // Console.Write("                        ");
         Console.CursorLeft = 0;
-        Console.Write($"sending: wrq");
+        // Console.Write($"sending: wrq");
 
         try
         {
@@ -49,21 +50,21 @@ class TftpClient
 
         Console.CursorLeft = 0;
         Console.CursorVisible = false;
-        Console.Write("sending: block #");
+        // Console.Write("sending: block #");
 
         Stopwatch timer = new();
         timer.Start();
         do
         {
-            for (int i = 1; i <= retryCount; i++)
+            for (int attempt = 1; attempt <= retryCount; attempt++)
             {
-                BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(), (ushort)OpCode.Data);
+                BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)OpCode.Data);
                 BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2), currentBlock);
 
                 bytesRead = file.Read(buffer, 4, maxBlockSize);
 
                 Console.CursorLeft = 16;
-                Console.Write(outputBlock);
+                //         Console.Write(outputBlock);
                 conn.Send(buffer, 4 + bytesRead, responder);
 
                 ParseResult res = ParseResponse(buffer, conn, ref responder);
@@ -75,7 +76,7 @@ class TftpClient
                     break;
                 }
 
-                if (res.Op == OpCode.Error || i >= retryCount)
+                if (res.Op == OpCode.Error || attempt >= retryCount)
                 {
                     if (res.Op != OpCode.Error)
                     {
@@ -91,7 +92,7 @@ class TftpClient
                     Console.WriteLine("tftpsharp: transfer failed");
                     if (res.Op == OpCode.Error)
                     {
-                        Console.WriteLine($"err received: {res.ErrorMessage}");
+                        Console.WriteLine($"err received: {res.Message}");
                     }
                     Console.WriteLine(
                         $"  sent {outputBlock} blocks, {(512 * (outputBlock - 1) + bytesRead)} bytes, {resends} resends"
@@ -133,11 +134,11 @@ class TftpClient
         int totalLength = 4 + fileName.Length + mode.Length;
         BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)OpCode.Wrq);
 
-        byte[] nameBytes = Encoding.UTF8.GetBytes(fileName);
-        byte[] modeBytes = Encoding.UTF8.GetBytes(mode);
+        byte[] nameBytes = UTF8.GetBytes(fileName);
+        byte[] modeBytes = UTF8.GetBytes(mode);
 
-        nameBytes.AsSpan().CopyTo(buffer.AsSpan(2));
-        modeBytes.AsSpan().CopyTo(buffer.AsSpan(2 + nameBytes.Length + 1));
+        nameBytes.CopyTo(buffer, 2);
+        modeBytes.CopyTo(buffer, 2 + nameBytes.Length + 1);
 
         conn.Send(buffer, totalLength, endpoint);
     }
@@ -154,7 +155,7 @@ class TftpClient
         BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)OpCode.Error);
         BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2), (ushort)errCode);
 
-        Encoding.UTF8.GetBytes(errorMessage).CopyTo(buffer, 4);
+        UTF8.GetBytes(errorMessage).CopyTo(buffer, 4);
         buffer[totalLength] = 0;
 
         conn.Send(buffer, totalLength + 1, endpoint);
@@ -184,12 +185,12 @@ class TftpClient
             case OpCode.Error:
             {
                 ushort errorCode = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
-                string errorMessage = Encoding.UTF8.GetString(buffer.AsSpan(4));
+                string errorMessage = UTF8.GetString(buffer, 4, buffer.Length);
                 return new ParseResult()
                 {
                     Op = op,
                     Err = (ErrorCode)errorCode,
-                    ErrorMessage = errorMessage,
+                    Message = errorMessage,
                 };
             }
             default:
