@@ -7,13 +7,14 @@ using static System.Text.Encoding;
 class TftpClient
 {
     Queue<byte[]> PacketQueue = [];
+
     public void SendFile(IPAddress remote, int port, string filePath, string mode)
     {
         int maxBlockSize = 512;
         int retryCount = 2;
         byte[] buffer = new byte[maxBlockSize + 4];
         IPEndPoint tftpServer = new(remote, port);
-        IPEndPoint? responder = null;
+        IPEndPoint? peer = null;
         using UdpClient conn = new();
         conn.Client.ReceiveTimeout = 3000;
 
@@ -27,10 +28,10 @@ class TftpClient
         try
         {
             SendRequest(buffer, conn, tftpServer, OpCode.Wrq, filename, mode);
-            ParseResult res = ParseResponse(buffer, conn, ref responder);
-            if (responder == null || res.Op != OpCode.Ack && res.BlockNumber != 0)
+            ParseResult res = ParseResponse(buffer, conn, ref peer);
+            if (peer == null || res.Op != OpCode.Ack && res.BlockNumber != 0)
             {
-                SendError(buffer, conn, responder, ErrorCode.Undefined, "bad ack");
+                SendError(buffer, conn, peer, ErrorCode.Undefined, "bad ack");
                 return;
             }
         }
@@ -44,8 +45,7 @@ class TftpClient
         using FileStream file = File.OpenRead(filePath);
 
         ushort currentBlock = 1;
-        int bytesRead = 0;
-        int outputBlock = 1;
+        int bytesRead = 512;
         int resends = 0;
 
         Console.CursorLeft = 0;
@@ -56,22 +56,30 @@ class TftpClient
         timer.Start();
         do
         {
+            if (PacketQueue.Count == 0)
+            {
+                for (int i = 0; i < 20 && bytesRead == 512; i++)
+                {
+                    byte[] arr = new byte[512];
+                    bytesRead = file.Read(arr);
+                    PacketQueue.Enqueue(arr);
+                }
+            }
+
+            BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)OpCode.Data);
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2), currentBlock);
+
+            byte[] block = PacketQueue.Dequeue();
+            block.CopyTo(buffer, 4);
+
             for (int attempt = 1; attempt <= retryCount; attempt++)
             {
-                BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)OpCode.Data);
-                BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2), currentBlock);
+                conn.Send(buffer, 4 + block.Length, peer);
 
-                bytesRead = file.Read(buffer, 4, maxBlockSize);
-
-                Console.CursorLeft = 16;
-                //         Console.Write(outputBlock);
-                conn.Send(buffer, 4 + bytesRead, responder);
-
-                ParseResult res = ParseResponse(buffer, conn, ref responder);
+                ParseResult res = ParseResponse(buffer, conn, ref peer);
 
                 if (res.Op == OpCode.Ack && res.BlockNumber == currentBlock)
                 {
-                    outputBlock++;
                     currentBlock++;
                     break;
                 }
@@ -80,11 +88,9 @@ class TftpClient
                 {
                     if (res.Op != OpCode.Error)
                     {
-                        SendError(buffer, conn, responder, ErrorCode.Undefined, "bad ack");
+                        SendError(buffer, conn, peer, ErrorCode.Undefined, "bad ack");
                     }
                     timer.Stop();
-
-                    outputBlock--;
 
                     Console.CursorLeft = 0;
                     Console.Write("                        ");
@@ -95,7 +101,7 @@ class TftpClient
                         Console.WriteLine($"err received: {res.Message}");
                     }
                     Console.WriteLine(
-                        $"  sent {outputBlock} blocks, {(512 * (outputBlock - 1) + bytesRead)} bytes, {resends} resends"
+                        $"  sent {currentBlock - 1} blocks, {(512 * (currentBlock - 2) + block.Length)} bytes, {resends} resends"
                     );
                     Console.WriteLine($"  elapsed time: {timer.ElapsedMilliseconds} ms");
                     Console.CursorVisible = true;
@@ -107,14 +113,13 @@ class TftpClient
         } while (bytesRead == maxBlockSize);
 
         timer.Stop();
-        outputBlock--;
 
         Console.CursorLeft = 0;
         Console.Write("                        ");
         Console.CursorLeft = 0;
         Console.WriteLine("tftpsharp: transfer complete");
         Console.WriteLine(
-            $"  sent {outputBlock} blocks, {(512 * (outputBlock - 1) + bytesRead)} bytes, {resends} resends"
+            $"  sent {currentBlock - 1} blocks, {(512 * (currentBlock - 2) + bytesRead)} bytes, {resends} resends"
         );
         Console.WriteLine($"  elapsed time: {timer.ElapsedMilliseconds} ms");
         Console.CursorVisible = true;
